@@ -38,20 +38,15 @@ def is_disposable(domain: str, disposable_set: set[str]) -> bool:
     return bool(domain) and domain in disposable_set
 
 
-def has_mx_record(domain: str, timeout: float = 2.0) -> bool:
-    """Check whether the domain has MX (mail server) DNS records.
-
-    Args:
-        domain: Domain to check.
-        timeout: Seconds allowed for the DNS query.
-
-    Returns:
-        True if at least one MX record is found; False otherwise.
-    """
+def has_mx_record(domain: str, timeout: float = 2.0) -> bool | None:
+    """Return True if domain has MX, False if definitely none, or None if unknown (timeout/errors)."""
     if not domain:
         return False
     try:
         answers = dns.resolver.resolve(domain, "MX", lifetime=timeout)
         return len(answers) > 0
+    except dns.resolver.Timeout:
+        return None
     except Exception:
+        # NXDOMAIN / NoAnswer / other resolution errors -> treat as no MX
         return False

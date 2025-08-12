@@ -30,3 +30,30 @@ def write_csv(df: pd.DataFrame) -> bytes:
         CSV content as UTF-8 bytes suitable for a download button.
     """
     return df.to_csv(index=False).encode("utf-8")
+
+# --- v1.1 helper: build ZIP bytes for Streamlit downloads ---
+import io
+import zipfile
+from typing import Dict
+
+def make_zip_from_bytes(files: Dict[str, bytes], compresslevel: int = 9) -> bytes:
+    """Create a ZIP archive (bytes) from a mapping of {filename: content_bytes}.
+
+    Args:
+        files: Dict of filename -> bytes (each value must be bytes or str).
+        compresslevel: ZIP_DEFLATED compression level (0-9).
+
+    Returns:
+        ZIP file content as raw bytes, ready for st.download_button(data=...).
+    """
+    buf = io.BytesIO()
+    with zipfile.ZipFile(
+        buf, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=compresslevel
+    ) as z:
+        for name, content in files.items():
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            z.writestr(name, content or b"")
+    buf.seek(0)
+    return buf.getvalue()
+
