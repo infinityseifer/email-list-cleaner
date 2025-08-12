@@ -1,22 +1,16 @@
+# Core dependencies
+streamlit==1.38.0
+pandas==2.2.2
 
----
+# Email validation & domain checks
+email-validator==2.2.0
+dnspython==2.6.1
 
-## `requirements.txt`
-```txt
-# Web UI
-streamlit>=1.36
+# String similarity for typo suggestions
+python-Levenshtein==0.25.1
 
-# Data handling
-pandas>=2.2
+# Extra (UI/formatting)
+rich==14.1.0
 
-# Email validation (RFC)
-email-validator>=2.1
-
-# Typos / fuzzy matching
-rapidfuzz>=3.9
-
-# DNS lookups for MX
-dnspython>=2.6
-
-# Env config (optional)
-python-dotenv>=1.0
+# For CSV handling (optional, but keeps things consistent)
+pyarrow==17.0.0
