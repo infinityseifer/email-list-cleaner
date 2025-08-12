@@ -15,3 +15,5 @@ __all__ = [
     "io_utils",
     "metrics",
 ]
+
+__version__ = "1.0.0"
