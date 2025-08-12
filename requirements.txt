@@ -1,0 +1,22 @@
+
+---
+
+## `requirements.txt`
+```txt
+# Web UI
+streamlit>=1.36
+
+# Data handling
+pandas>=2.2
+
+# Email validation (RFC)
+email-validator>=2.1
+
+# Typos / fuzzy matching
+rapidfuzz>=3.9
+
+# DNS lookups for MX
+dnspython>=2.6
+
+# Env config (optional)
+python-dotenv>=1.0
