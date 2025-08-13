@@ -11,7 +11,7 @@ pip install -r requirements.txt
 streamlit run app/app.py
 
 🎯 What It Does (MVP)  
-[**Open the MVP App**](https://email-list-cleaner-v1-0-0-mvp.streamlit.app/) | [**Try v1.1 Preview**](https://email-list-cleaner-v1-1-preview.streamlit.app/)
+[**Open the MVP App**](https://email-list-cleaner-v1-0-0-mvp.streamlit.app/) | [**Try v1.1 Preview**](https://email-list-cleaner-v1-1-0.streamlit.app/)
 
 
 - Upload a `.csv` file (UTF-8, ≤ 20MB) containing email addresses  
@@ -124,7 +124,7 @@ See [Deployment](docs/DEPLOYMENT.md)
 - **[MVP – v1.0.0](https://email-list-cleaner-v1-0-0-mvp.streamlit.app/)**  
   Stable, locked release with core features described in the MVP section.
 
-- **[Preview – v1.1.0 (In Progress)](https://email-list-cleaner-v1-1-preview.streamlit.app/)**  
+- **[Preview – v1.1.0 (In Progress)](https://email-list-cleaner-v1-1-0.streamlit.app/)**  
   Development build with new features, UI enhancements, and experimental tools.  
   ⚠ May contain bugs or incomplete functionality.
 
