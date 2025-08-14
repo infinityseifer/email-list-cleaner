@@ -1,11 +1,12 @@
-"""Streamlit UI for the Email List Cleaner (v1.2).
+"""Streamlit UI for the Email List Cleaner (v1.1 + suppression wiring).
 
 What this file does:
 - CSV upload & preview
 - Sidebar settings (Safe mode, MX checks, MX timeout)
+- Optional suppression CSV (exclude those emails before validation)
 - Cleaning & validation pipeline wiring
-- Insights: "Why rejected?" histogram + CSV
-- Reliable ZIP download (Cleaned, Rejected, Insights)
+- Insights: "Why excluded/rejected?" histogram + CSV
+- Reliable ZIP download (Cleaned, Rejected, Suppressed, Insights)
 
 Notes:
 - All processing remains in-memory (privacy-friendly).
@@ -13,7 +14,6 @@ Notes:
 """
 from __future__ import annotations
 
-import io
 import time
 from typing import Iterable
 
@@ -27,11 +27,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # --- Core project imports ---
 from elc import config
-from elc.io_utils import read_csv_any, write_csv, make_zip_from_bytes
-from elc.cleaning import dedupe_and_drop_blanks, split_local_domain
+from elc.cleaning import dedupe_and_drop_blanks, split_local_domain, normalize_email
+from elc.io_utils import read_csv_any, write_csv
 from elc.validate import is_rfc_valid, is_disposable, has_mx_record
 from elc.suggest import suggest_domain, COMMON_FIXES
-from elc.insights import reasons_histogram, summary_kpis
+from elc.insights import reasons_histogram, summary_kpis, combine_for_insights
+from elc.suppression import to_suppression_set
+
+# Optional: if make_zip_from_bytes isn't in io_utils yet, define a local fallback
+try:
+    from elc.io_utils import make_zip_from_bytes  # type: ignore
+except Exception:
+    import io, zipfile
+    def make_zip_from_bytes(files: dict[str, bytes], compresslevel: int = 9) -> bytes:
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=compresslevel) as z:
+            for name, data in files.items():
+                z.writestr(name, data)
+        return buf.getvalue()
 
 st.set_page_config(page_title="Email List Cleaner", page_icon="✅")
 
@@ -65,23 +78,7 @@ def _clean_and_validate(
     safe_mode: bool = True,
     mx_timeout: float = config.DNS_TIMEOUT,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """Run the cleaning & validation pipeline over a DataFrame.
-
-    Args:
-        df: Input DataFrame containing at least an email column.
-        email_col: Name of the column with email addresses.
-        disposable_set: Set of domains considered disposable/temporary.
-        common_domains: Iterable of known legit domains for typo suggestions.
-        mx_check: If True, check MX DNS records (slower).
-        safe_mode: If True, keep borderline rows and apply safe fixes.
-        mx_timeout: Per-domain MX query timeout in seconds.
-
-    Returns:
-        (valid_df, rejected_df, summary)
-            valid_df: Rows that passed checks; email may be auto-fixed.
-            rejected_df: Rows that failed checks, with 'reasons' and 'suggested_domain'.
-            summary: Dict with totals and percentages.
-    """
+    """Run the cleaning & validation pipeline over a DataFrame."""
     total = len(df)
     df = dedupe_and_drop_blanks(df, email_col)
 
@@ -97,10 +94,9 @@ def _clean_and_validate(
 
         mx_status: bool | None = True
         if mx_check and domain:
-            # has_mx_record returns:
-            #   True  -> has MX
-            #   False -> definitely no MX
-            #   None  -> timeout/unknown error
+            # True  -> has MX
+            # False -> no MX
+            # None  -> timeout/unknown
             mx_status = has_mx_record(domain, timeout=mx_timeout)
 
         fix = COMMON_FIXES.get(domain) or suggest_domain(domain, list(common_domains))
@@ -116,8 +112,6 @@ def _clean_and_validate(
             elif mx_status is None:
                 reasons.append("mx_unknown")
 
-        # Borderline means: syntactically OK, not disposable, MX not failing,
-        # and we *have* a domain fix suggestion.
         borderline = (
             rfc_ok
             and not disposable
@@ -126,7 +120,6 @@ def _clean_and_validate(
         )
 
         if (not reasons) or (safe_mode and borderline):
-            # Apply safe domain fix (do not modify local part)
             if fix and not disposable and domain:
                 email = f"{local}@{fix}"
                 row[email_col] = email
@@ -173,15 +166,32 @@ with st.sidebar:
         help="Per-domain DNS query timeout. Longer timeouts may be slower.",
     )
     st.divider()
-    st.markdown(
-        "_v1.1 UI: MX timeout & insights. All data stays in-memory; nothing is stored._"
+    st.markdown("_v1.1 UI: MX timeout & insights. All data stays in-memory; nothing is stored._")
+
+    # Suppression controls
+    st.subheader("Suppression (optional)")
+    suppression_file = st.file_uploader(
+        "Upload suppression CSV",
+        type=["csv"],
+        key="supp_csv",
+        help="Rows whose email appears in this list will be excluded and labeled 'suppressed'.",
     )
+    suppression_df = None
+    suppression_email_col = None
+    if suppression_file:
+        suppression_df = read_csv_any(suppression_file)
+        st.caption(f"Suppression rows: {len(suppression_df):,}")
+        suppression_email_col = st.selectbox(
+            "Suppression email column",
+            options=suppression_df.columns.tolist(),
+            key="supp_email_col",
+        )
 
 # Upload
 file = st.file_uploader("Upload CSV", type=["csv"], help="Upload your email list as a CSV file (UTF-8)")
 
 if file:
-    # Optional guardrail: file size limit (if provided by uploader)
+    # Optional guardrail: size limit (if provided by uploader)
     if hasattr(file, "size") and file.size and file.size > config.MAX_FILE_MB * 1024 * 1024:
         st.error(f"File is larger than {config.MAX_FILE_MB} MB. Please upload a smaller CSV.")
         st.stop()
@@ -197,8 +207,26 @@ if file:
 
     if st.button("Clean & Validate", type="primary"):
         start = time.perf_counter()
+
+        # 1) Build suppression set (canonicalized), if provided
+        suppression_set: set[str] = set()
+        suppressed_df = pd.DataFrame()
+        if suppression_df is not None and suppression_email_col:
+            suppression_set = to_suppression_set(suppression_df, suppression_email_col)
+
+        # 2) Split out suppressed BEFORE validation (case-insensitive)
+        working_df = df.copy()
+        if suppression_set:
+            canonical_series = working_df[email_col].astype(str).map(lambda e: normalize_email(e).lower())
+            mask_supp = canonical_series.isin(suppression_set)
+            if mask_supp.any():
+                suppressed_df = working_df.loc[mask_supp].copy()
+                suppressed_df["reasons"] = "suppressed"
+                working_df = working_df.loc[~mask_supp].copy()
+
+        # 3) Run the pipeline on the remaining rows
         valid_df, rejected_df, summary = _clean_and_validate(
-            df,
+            working_df,
             email_col,
             disposable_set,
             common_domains,
@@ -208,45 +236,36 @@ if file:
         )
         dur = time.perf_counter() - start
 
+        # 4) KPIs based on original input total
+        total_input = len(df)
         kpis = summary_kpis(
-            total=summary["total_rows"],
-            valid=summary["valid"],
-            rejected=summary["rejected"],
+            total=total_input,
+            valid=len(valid_df),
+            rejected=len(rejected_df),
             duration_s=dur,
         )
+        suppressed_count = len(suppressed_df)
+        if suppressed_count:
+            kpis["suppressed_rows"] = suppressed_count
+            st.info(f"Suppressed {suppressed_count:,} rows based on your suppression list.")
 
+        suppressed_str = f", {kpis['suppressed_rows']:,} suppressed" if suppressed_count else ""
         st.success(
             f"Processed {kpis['total_rows']:,} rows in {kpis['duration_s']:.3f}s → "
-            f"{kpis['valid_rows']:,} valid, {kpis['rejected_rows']:,} rejected "
-            f"({kpis['valid_rate_pct']}% valid)."
+            f"{kpis['valid_rows']:,} valid, {kpis['rejected_rows']:,} rejected"
+            f"{suppressed_str} ({kpis['valid_rate_pct']}% valid)."
         )
 
-        # Downloads: individual CSVs
-        c1, c2 = st.columns(2)
-        with c1:
-            if not valid_df.empty:
-                st.download_button(
-                    "⬇️ Download Cleaned CSV",
-                    data=write_csv(valid_df),
-                    file_name="cleaned_emails.csv",
-                    mime="text/csv",
-                )
-        with c2:
-            if not rejected_df.empty:
-                st.download_button(
-                    "⬇️ Download Rejected CSV",
-                    data=write_csv(rejected_df),
-                    file_name="rejected_emails.csv",
-                    mime="text/csv",
-                )
-
-        # Insights: Why rejected?
+        # 5) Insights over rejected + suppressed
         insights_csv_bytes: bytes | None = None
-        if not rejected_df.empty and "reasons" in rejected_df.columns:
-            st.subheader("Why were emails rejected?")
-            hist = reasons_histogram(rejected_df, reason_col="reasons")
+        insights_source = combine_for_insights(rejected_df, suppressed_df, reason_col="reasons")
+        if not insights_source.empty and "reasons" in insights_source.columns:
+            st.subheader("Why were emails excluded or rejected?")
+            hist = reasons_histogram(insights_source, reason_col="reasons")
             if not hist.empty:
                 st.dataframe(hist, use_container_width=True)
+                # Quick bar chart for counts
+                st.bar_chart(hist.set_index("reason")["count"])
                 insights_csv_bytes = hist.to_csv(index=False).encode("utf-8")
                 st.download_button(
                     "⬇️ Download Insights CSV",
@@ -255,14 +274,44 @@ if file:
                     mime="text/csv",
                 )
             else:
-                st.info("No rejection reasons to summarize.")
+                st.info("No reasons to summarize.")
+        else:
+            st.info("No rejected or suppressed rows to analyze.")
 
-        # Bundle ZIP (Cleaned, Rejected, Insights if present)
+        # 6) Downloads: individual CSVs
+        col_left, col_right = st.columns(2)
+        with col_left:
+            if not valid_df.empty:
+                st.download_button(
+                    "⬇️ Download Cleaned CSV",
+                    data=write_csv(valid_df),
+                    file_name="cleaned_emails.csv",
+                    mime="text/csv",
+                )
+        with col_right:
+            if not rejected_df.empty:
+                st.download_button(
+                    "⬇️ Download Rejected CSV",
+                    data=write_csv(rejected_df),
+                    file_name="rejected_emails.csv",
+                    mime="text/csv",
+                )
+        if not suppressed_df.empty:
+            st.download_button(
+                "⬇️ Download Suppressed CSV",
+                data=write_csv(suppressed_df),
+                file_name="suppressed_emails.csv",
+                mime="text/csv",
+            )
+
+        # 7) ZIP bundle (Cleaned, Rejected, Suppressed, Insights)
         files_for_zip: dict[str, bytes] = {}
         if not valid_df.empty:
             files_for_zip["cleaned_emails.csv"] = write_csv(valid_df)
         if not rejected_df.empty:
             files_for_zip["rejected_emails.csv"] = write_csv(rejected_df)
+        if not suppressed_df.empty:
+            files_for_zip["suppressed_emails.csv"] = write_csv(suppressed_df)
         if insights_csv_bytes:
             files_for_zip["rejection_insights.csv"] = insights_csv_bytes
 
@@ -277,12 +326,15 @@ if file:
                 use_container_width=True,
             )
 
-        # Optional: quick previews
+        # 8) Optional previews
         if not valid_df.empty:
             st.write("#### Cleaned (top 10)")
             st.dataframe(valid_df.head(10), use_container_width=True)
         if not rejected_df.empty:
             st.write("#### Rejected (top 10)")
             st.dataframe(rejected_df.head(10), use_container_width=True)
+        if not suppressed_df.empty:
+            st.write("#### Suppressed (top 10)")
+            st.dataframe(suppressed_df.head(10), use_container_width=True)
 else:
     st.info("Upload a CSV to get started.")
