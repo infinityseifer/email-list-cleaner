@@ -13,7 +13,6 @@ Notes:
 """
 from __future__ import annotations
 
-import io
 import time
 from typing import Iterable
 
@@ -27,13 +26,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # --- Core project imports ---
 from elc import config
-from elc.io_utils import read_csv_any, write_csv, make_zip_from_bytes
+from elc.io_utils import read_csv_any, write_csv, make_zip_from_bytes, make_zip_from_bytes
 from elc.cleaning import dedupe_and_drop_blanks, split_local_domain
 from elc.validate import is_rfc_valid, is_disposable, has_mx_record
 from elc.suggest import suggest_domain, COMMON_FIXES
 from elc.insights import reasons_histogram, summary_kpis
 
 st.set_page_config(page_title="Email List Cleaner", page_icon="✅")
+
+# Preset → default email column (if present in uploaded CSV)
+PRESETS: dict[str, str | None] = {
+    "Generic CSV": None,               # no preselect
+    "Mailchimp Export": "Email Address",
+    "HubSpot Export": "Email",
+}
 
 
 def _load_sets() -> tuple[set[str], list[str]]:
@@ -176,6 +182,13 @@ with st.sidebar:
     st.markdown(
         "_v1.1 UI: MX timeout & insights. All data stays in-memory; nothing is stored._"
     )
+    st.subheader("Presets")
+    preset_name = st.selectbox("Column mapping preset", list(PRESETS.keys()), index=0)
+    st.caption("If the preset’s email column exists in your file, it will be auto-selected.")
+
+    # Remember last chosen email column per session
+    if "last_email_col" not in st.session_state:
+        st.session_state.last_email_col = None
 
 # Upload
 file = st.file_uploader("Upload CSV", type=["csv"], help="Upload your email list as a CSV file (UTF-8)")
@@ -193,7 +206,22 @@ if file:
     st.write("### File Preview", df.head(10))
     st.caption(f"Rows: {len(df):,} • Columns: {len(df.columns)}")
 
-    email_col = st.selectbox("Select email column", options=df.columns.tolist())
+    # Decide default email column: last choice > preset > first column
+    preset_email_col = PRESETS.get(preset_name)
+    if st.session_state.last_email_col in df.columns:
+        default_email_col = st.session_state.last_email_col
+    elif preset_email_col and preset_email_col in df.columns:
+        default_email_col = preset_email_col
+    else:
+        default_email_col = df.columns[0] if len(df.columns) else None
+
+    # Render selector with a guaranteed int index
+    options = list(df.columns)
+    index = options.index(default_email_col) if default_email_col in options else 0
+    email_col = st.selectbox("Select email column", options=options, index=index)
+
+    # Remember the user’s choice for this session
+    st.session_state.last_email_col = email_col
 
     if st.button("Clean & Validate", type="primary"):
         start = time.perf_counter()
