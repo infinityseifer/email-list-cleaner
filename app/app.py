@@ -1,4 +1,4 @@
-"""Streamlit UI for the Email List Cleaner (v1.1).
+"""Streamlit UI for the Email List Cleaner (v1.2).
 
 What this file does:
 - CSV upload & preview
